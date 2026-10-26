@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'features/mesh/presentation/debug_connection_screen.dart';
+
 void main() {
   runApp(const ProviderScope(child: DeviceMeshApp()));
 }
@@ -23,14 +25,7 @@ class DeviceMeshApp extends StatelessWidget {
           surface: Color(0xFF0E1422),
         ),
       ),
-      home: const Scaffold(
-        body: Center(
-          child: Text(
-            'DeviceMesh\nMany Devices. One Intelligence.',
-            textAlign: TextAlign.center,
-          ),
-        ),
-      ),
+      home: const DebugConnectionScreen(),
     );
   }
 }

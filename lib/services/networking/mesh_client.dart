@@ -7,7 +7,9 @@ import '../protocol/protocol_codec.dart';
 import '../protocol/protocol_exception.dart';
 import '../protocol/protocol_message.dart';
 
-/// DEV-MODE client: plain ws://, no authentication yet.
+enum PairOutcome { approved, rejected, denied, timedOut, disconnected }
+
+/// DEV-MODE client: plain ws://, pairing by code, token-based resume.
 class MeshClient {
   MeshClient({
     required this.deviceId,
@@ -29,20 +31,31 @@ class MeshClient {
   StreamSubscription<dynamic>? _sub;
   Timer? _heartbeatTimer;
   Completer<void>? _helloDone;
+  Completer<PairOutcome>? _pairDone;
+  String? _offeredToken;
   final Stopwatch _clock = Stopwatch()..start(); // monotonic
   final Map<int, int> _pending = {}; // seq -> sent micros
   int _seq = 0;
 
   String? serverDeviceId;
 
+  /// Set after approval or a successful token resume.
+  String? sessionId;
+
+  /// Secret issued by the coordinator. Keep it only in memory/secure storage.
+  String? sessionToken;
+
   bool get isConnected => _channel != null;
+  bool get isPaired => _channel != null && sessionId != null;
 
   Future<bool> connect(
     String host,
     int port, {
+    String? resumeToken,
     Duration timeout = const Duration(seconds: 5),
   }) async {
     await disconnect();
+    _offeredToken = resumeToken;
 
     final channel = WebSocketChannel.connect(Uri.parse('ws://$host:$port'));
     try {
@@ -67,7 +80,11 @@ class MeshClient {
       cancelOnError: true,
     );
 
-    _send(MessageType.hello, {'deviceName': deviceName, 'role': 'worker'});
+    _send(MessageType.hello, {
+      'deviceName': deviceName,
+      'role': 'worker',
+      'token': ?resumeToken,
+    });
 
     try {
       await _helloDone!.future.timeout(timeout);
@@ -77,6 +94,24 @@ class MeshClient {
       return false;
     }
     return true;
+  }
+
+  /// Sends the pairing code and waits for the coordinator's decision.
+  Future<PairOutcome> pair(
+    String code, {
+    Duration timeout = const Duration(seconds: 75),
+  }) async {
+    if (_channel == null) return PairOutcome.disconnected;
+    final done = Completer<PairOutcome>();
+    _pairDone = done;
+    _send(MessageType.pairRequest, {'code': code, 'deviceName': deviceName});
+    try {
+      return await done.future.timeout(timeout);
+    } on TimeoutException {
+      return PairOutcome.timedOut;
+    } finally {
+      if (identical(_pairDone, done)) _pairDone = null;
+    }
   }
 
   void startHeartbeat([Duration interval = const Duration(seconds: 2)]) {
@@ -90,7 +125,7 @@ class MeshClient {
   }
 
   void sendHeartbeat() {
-    if (_channel == null) return;
+    if (_channel == null || sessionId == null) return;
     final seq = ++_seq;
     if (_pending.length > 50) _pending.remove(_pending.keys.first);
     _pending[seq] = _clock.elapsedMicroseconds;
@@ -115,7 +150,14 @@ class MeshClient {
     _sub?.cancel();
     _sub = null;
     _channel = null;
+    sessionId = null;
     _pending.clear();
+    _completePair(PairOutcome.disconnected);
+  }
+
+  void _completePair(PairOutcome outcome) {
+    final c = _pairDone;
+    if (c != null && !c.isCompleted) c.complete(outcome);
   }
 
   void _onClosed() {
@@ -132,8 +174,26 @@ class MeshClient {
       switch (msg.type) {
         case MessageType.hello:
           serverDeviceId = msg.senderDeviceId;
+          final resumed = msg.payload['resumed'] == true;
+          if (resumed && msg.sessionId != null) {
+            sessionId = msg.sessionId;
+            sessionToken = _offeredToken;
+            onLog?.call('Session resumed');
+          } else {
+            sessionToken = null;
+          }
           onLog?.call('HELLO from ${msg.payload['deviceName']}');
           if (!(_helloDone?.isCompleted ?? true)) _helloDone!.complete();
+        case MessageType.pairApproved:
+          final token = msg.payload['token'];
+          if (token is String && msg.sessionId != null) {
+            sessionId = msg.sessionId;
+            sessionToken = token;
+            _completePair(PairOutcome.approved);
+          } else {
+            onLog?.call('Malformed PAIR_APPROVED');
+            _completePair(PairOutcome.rejected);
+          }
         case MessageType.heartbeatAck:
           final seq = msg.payload['seq'];
           if (seq is int) {
@@ -143,9 +203,12 @@ class MeshClient {
             }
           }
         case MessageType.error:
+          final code = msg.payload['code'];
           onLog?.call('Server error: ${msg.payload['message']}');
+          if (code == 'pairRejected') _completePair(PairOutcome.rejected);
+          if (code == 'pairDenied') _completePair(PairOutcome.denied);
         case MessageType.goodbye:
-          onLog?.call('Server said GOODBYE');
+          onLog?.call('Server said GOODBYE (${msg.payload['reason'] ?? '-'})');
         default:
           onLog?.call('Unhandled ${msg.type.wire}');
       }
@@ -158,6 +221,7 @@ class MeshClient {
     _channel?.sink.add(codec.encode(ProtocolMessage.create(
       type: type,
       senderDeviceId: deviceId,
+      sessionId: sessionId,
       payload: payload,
     )));
   }

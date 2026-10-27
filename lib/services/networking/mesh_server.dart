@@ -10,6 +10,8 @@ import '../protocol/protocol_codec.dart';
 import '../protocol/protocol_exception.dart';
 import '../protocol/protocol_message.dart';
 import 'pairing_manager.dart';
+import '../../features/devices/data/device_registry.dart';
+import '../../features/devices/domain/device_capabilities.dart';
 
 enum PeerState { connected, helloDone, pendingApproval, authenticated }
 
@@ -57,6 +59,8 @@ class MeshServer {
   /// Called when a device presented a valid code and awaits approval.
   /// If null, join requests are rejected (nobody can approve them).
   void Function(PeerInfo request)? onPairRequest;
+
+  final DeviceRegistry registry = DeviceRegistry();
 
   HttpServer? _server;
   final Map<WebSocketChannel, _Peer> _peers = {};
@@ -113,6 +117,7 @@ class MeshServer {
     peer.approvalTimer?.cancel();
     final token = pairing.issueToken(deviceId);
     peer.state = PeerState.authenticated;
+    registry.connected(deviceId, peer.deviceName);
     _send(entry.key, MessageType.pairApproved, {'token': token},
         sessionId: pairing.sessionId);
     onLog?.call('Approved ${peer.deviceName}');
@@ -138,7 +143,9 @@ class MeshServer {
       _send(entry.key, MessageType.goodbye, {'reason': 'revoked'});
       _close(entry.key);
     }
+    registry.remove(deviceId);
     onLog?.call('Revoked ${_short(deviceId)}');
+    _notify();
   }
 
   void _onConnection(WebSocketChannel channel, String? protocol) {
@@ -159,7 +166,9 @@ class MeshServer {
     final peer = _peers.remove(channel);
     if (peer == null) return;
     peer.approvalTimer?.cancel();
-    if (peer.deviceId != null) {
+    final id = peer.deviceId;
+    if (id != null) {
+      if (peer.state == PeerState.authenticated) registry.disconnected(id);
       onLog?.call('Peer disconnected: ${peer.deviceName}');
     }
     _notify();
@@ -260,6 +269,7 @@ class MeshServer {
     );
     onLog?.call(
         'HELLO from ${peer.deviceName} (${_short(id)})${resumed ? ' [resumed]' : ''}');
+    if (resumed) registry.connected(id, peer.deviceName);
     _notify();
   }
 
@@ -301,14 +311,34 @@ class MeshServer {
   void _onAuthenticated(WebSocketChannel channel, ProtocolMessage msg) {
     switch (msg.type) {
       case MessageType.heartbeat:
+        registry.markSeen(msg.senderDeviceId);
         _send(
           channel,
           MessageType.heartbeatAck,
           {'seq': msg.payload['seq'], 'echoTimestamp': msg.timestamp},
           sessionId: pairing.sessionId,
         );
+      case MessageType.capabilityAdvertisement:
+        _onCapabilities(channel, msg);
       default:
         onLog?.call('Unhandled ${msg.type.wire}');
+    }
+  }
+
+  void _onCapabilities(WebSocketChannel channel, ProtocolMessage msg) {
+    final id = msg.senderDeviceId;
+    try {
+      final caps = DeviceCapabilities.fromJson(msg.payload);
+      if (!registry.setCapabilities(id, caps)) {
+        onLog?.call('Capabilities from unknown device ignored');
+        return;
+      }
+      final tasks = caps.supportedTasks.map((t) => t.wire).join(', ');
+      onLog?.call(
+          'Capabilities from ${_short(id)}: ${tasks.isEmpty ? 'none' : tasks}');
+      _notify();
+    } on FormatException catch (e) {
+      _sendError(channel, 'invalidCapabilities', e.message);
     }
   }
 

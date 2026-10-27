@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
-
+import '../../features/devices/domain/device_capabilities.dart';
 import '../protocol/message_type.dart';
 import '../protocol/protocol_codec.dart';
 import '../protocol/protocol_exception.dart';
@@ -15,6 +15,7 @@ class MeshClient {
     required this.deviceId,
     required this.deviceName,
     this.codec = const ProtocolCodec(),
+    this.capabilities,
     this.onLog,
     this.onLatency,
     this.onDisconnected,
@@ -23,6 +24,9 @@ class MeshClient {
   final String deviceId;
   final String deviceName;
   final ProtocolCodec codec;
+
+  /// Sent to the coordinator right after pairing or session resume.
+  final DeviceCapabilities? capabilities;
   final void Function(String message)? onLog;
   final void Function(double milliseconds)? onLatency;
   final void Function()? onDisconnected;
@@ -179,6 +183,7 @@ class MeshClient {
             sessionId = msg.sessionId;
             sessionToken = _offeredToken;
             onLog?.call('Session resumed');
+            _advertise();
           } else {
             sessionToken = null;
           }
@@ -189,6 +194,7 @@ class MeshClient {
           if (token is String && msg.sessionId != null) {
             sessionId = msg.sessionId;
             sessionToken = token;
+            _advertise();
             _completePair(PairOutcome.approved);
           } else {
             onLog?.call('Malformed PAIR_APPROVED');
@@ -215,6 +221,12 @@ class MeshClient {
     } on ProtocolException catch (e) {
       onLog?.call('Bad message: ${e.message}');
     }
+  }
+
+  void _advertise() {
+    final caps = capabilities;
+    if (caps == null) return;
+    _send(MessageType.capabilityAdvertisement, caps.toJson());
   }
 
   void _send(MessageType type, Map<String, dynamic> payload) {

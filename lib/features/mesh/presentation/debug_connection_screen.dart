@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-
+import '../../devices/data/local_capabilities.dart';
 import '../../../core/utils/device_identity.dart';
 import '../../../core/utils/local_ip.dart';
 import '../../../services/networking/mesh_client.dart';
@@ -116,6 +116,7 @@ class _DebugConnectionScreenState extends State<DebugConnectionScreen> {
     final client = MeshClient(
       deviceId: id,
       deviceName: _name,
+      capabilities: LocalCapabilities.detect(),
       onLog: _log,
       onLatency: (ms) {
         if (mounted) setState(() => _latencyMs = ms);

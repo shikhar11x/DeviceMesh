@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-
+import 'orbit/mesh_orbit_view.dart';
 import '../../../app/theme/app_spacing.dart';
 import '../../../core/widgets/staggered_entrance.dart';
 import 'widgets/coordinator_panel.dart';
@@ -16,6 +16,7 @@ class DebugConnectionScreen extends StatelessWidget {
   static const List<Widget> _sections = [
     ScreenHeader(),
     DevBanner(),
+    MeshOrbitView(),
     CoordinatorPanel(),
     WorkerPanel(),
     LogView(),

@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../app/theme/app_colors.dart';
+import '../../../../app/theme/app_spacing.dart';
 import '../../../../app/theme/app_typography.dart';
 import '../../../../core/widgets/extruded_text.dart';
 import '../../../../core/widgets/status_chip.dart';
 import '../../application/identity_provider.dart';
+import '../orbit/brand_mark.dart';
 
 class ScreenHeader extends ConsumerWidget {
   const ScreenHeader({super.key});
@@ -16,7 +18,10 @@ class ScreenHeader extends ConsumerWidget {
     final name = id == null ? '...' : deviceNameFor(id);
 
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        const BrandMark(),
+        const SizedBox(width: AppSpacing.md),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -29,10 +34,11 @@ class ScreenHeader extends ConsumerWidget {
               const SizedBox(height: 6),
               const Text('Many Devices. One Intelligence.',
                   style: AppText.muted),
+              const SizedBox(height: AppSpacing.sm),
+              StatusChip(label: name, color: AppColors.violet),
             ],
           ),
         ),
-        StatusChip(label: name, color: AppColors.violet),
       ],
     );
   }

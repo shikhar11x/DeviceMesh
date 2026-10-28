@@ -56,7 +56,8 @@ class _Tilt3DState extends State<Tilt3D> {
   Widget build(BuildContext context) {
     if (MediaQuery.of(context).disableAnimations) return widget.child;
 
-    return Listener(
+        return Listener(
+      behavior: HitTestBehavior.translucent,
       onPointerDown: _onPointer,
       onPointerMove: _onPointer,
       onPointerUp: _onRelease,

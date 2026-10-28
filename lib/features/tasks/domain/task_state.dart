@@ -14,4 +14,4 @@ enum TaskState {
 }
 
 /// How a stored result was checked. Rejected results are never stored.
-enum ResultValidation { formatOnly, spotChecked }
+enum ResultValidation { formatOnly, spotChecked, trustedLocal }

@@ -19,6 +19,7 @@ class MeshClient {
     this.onLog,
     this.onLatency,
     this.onDisconnected,
+    this.onTaskMessage,
   });
 
   final String deviceId;
@@ -30,6 +31,10 @@ class MeshClient {
   final void Function(String message)? onLog;
   final void Function(double milliseconds)? onLatency;
   final void Function()? onDisconnected;
+
+  /// TASK_ASSIGN / TASK_CANCEL from the coordinator, already checked to
+  /// belong to this paired session.
+  final void Function(ProtocolMessage message)? onTaskMessage;
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _sub;
@@ -213,6 +218,13 @@ class MeshClient {
           onLog?.call('Server error: ${msg.payload['message']}');
           if (code == 'pairRejected') _completePair(PairOutcome.rejected);
           if (code == 'pairDenied') _completePair(PairOutcome.denied);
+        case MessageType.taskAssign:
+        case MessageType.taskCancel:
+          if (isPaired && msg.sessionId == sessionId) {
+            onTaskMessage?.call(msg);
+          } else {
+            onLog?.call('Ignored ${msg.type.wire} outside the session');
+          }
         case MessageType.goodbye:
           onLog?.call('Server said GOODBYE (${msg.payload['reason'] ?? '-'})');
         default:
@@ -221,6 +233,22 @@ class MeshClient {
     } on ProtocolException catch (e) {
       onLog?.call('Bad message: ${e.message}');
     }
+  }
+
+  static const Set<MessageType> _workerTaskTypes = {
+    MessageType.taskAccept,
+    MessageType.taskStarted,
+    MessageType.taskResult,
+    MessageType.taskFailed,
+  };
+
+  /// Worker -> coordinator task messages. Only a paired client may send them.
+  void sendTask(MessageType type, Map<String, dynamic> payload) {
+    if (!_workerTaskTypes.contains(type)) {
+      throw ArgumentError.value(type, 'type', 'not a worker task message');
+    }
+    if (!isPaired) return;
+    _send(type, payload);
   }
 
   void _advertise() {

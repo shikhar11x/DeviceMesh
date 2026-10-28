@@ -60,6 +60,12 @@ class MeshServer {
   /// If null, join requests are rejected (nobody can approve them).
   void Function(PeerInfo request)? onPairRequest;
 
+  /// Task messages (ACCEPT, STARTED, RESULT, FAILED) from authenticated workers.
+  void Function(String deviceId, ProtocolMessage message)? onTaskMessage;
+
+  /// An authenticated device disconnected (socket closed, revoked, replaced).
+  void Function(String deviceId)? onDeviceLost;
+
   final DeviceRegistry registry = DeviceRegistry();
 
   HttpServer? _server;
@@ -69,14 +75,14 @@ class MeshServer {
   int? get port => _server?.port;
 
   List<PeerInfo> get peers => [
-        for (final p in _peers.values)
-          if (p.deviceId != null)
-            PeerInfo(
-              deviceId: p.deviceId!,
-              deviceName: p.deviceName,
-              state: p.state,
-            ),
-      ];
+    for (final p in _peers.values)
+      if (p.deviceId != null)
+        PeerInfo(
+          deviceId: p.deviceId!,
+          deviceName: p.deviceName,
+          state: p.state,
+        ),
+  ];
 
   List<PeerInfo> get pendingRequests =>
       peers.where((p) => p.state == PeerState.pendingApproval).toList();
@@ -118,8 +124,9 @@ class MeshServer {
     final token = pairing.issueToken(deviceId);
     peer.state = PeerState.authenticated;
     registry.connected(deviceId, peer.deviceName);
-    _send(entry.key, MessageType.pairApproved, {'token': token},
-        sessionId: pairing.sessionId);
+    _send(entry.key, MessageType.pairApproved, {
+      'token': token,
+    }, sessionId: pairing.sessionId);
     onLog?.call('Approved ${peer.deviceName}');
     _notify();
     return true;
@@ -168,7 +175,10 @@ class MeshServer {
     peer.approvalTimer?.cancel();
     final id = peer.deviceId;
     if (id != null) {
-      if (peer.state == PeerState.authenticated) registry.disconnected(id);
+      if (peer.state == PeerState.authenticated) {
+        registry.disconnected(id);
+        onDeviceLost?.call(id);
+      }
       onLog?.call('Peer disconnected: ${peer.deviceName}');
     }
     _notify();
@@ -195,8 +205,10 @@ class MeshServer {
       _handle(channel, codec.decode(data));
     } on ProtocolException catch (e) {
       onLog?.call('Rejected message: ${e.code.name}');
-      _send(channel, MessageType.error,
-          {'code': e.code.name, 'message': e.message});
+      _send(channel, MessageType.error, {
+        'code': e.code.name,
+        'message': e.message,
+      });
     }
   }
 
@@ -261,19 +273,23 @@ class MeshServer {
     peer.deviceName = name is String ? _clip(name) : 'unknown';
     peer.state = resumed ? PeerState.authenticated : PeerState.helloDone;
 
-    _send(
-      channel,
-      MessageType.hello,
-      {'deviceName': deviceName, 'role': 'coordinator', 'resumed': resumed},
-      sessionId: resumed ? pairing.sessionId : null,
-    );
+    _send(channel, MessageType.hello, {
+      'deviceName': deviceName,
+      'role': 'coordinator',
+      'resumed': resumed,
+    }, sessionId: resumed ? pairing.sessionId : null);
     onLog?.call(
-        'HELLO from ${peer.deviceName} (${_short(id)})${resumed ? ' [resumed]' : ''}');
+      'HELLO from ${peer.deviceName} (${_short(id)})${resumed ? ' [resumed]' : ''}',
+    );
     if (resumed) registry.connected(id, peer.deviceName);
     _notify();
   }
 
-  void _onPairRequest(WebSocketChannel channel, _Peer peer, ProtocolMessage msg) {
+  void _onPairRequest(
+    WebSocketChannel channel,
+    _Peer peer,
+    ProtocolMessage msg,
+  ) {
     if (peer.state != PeerState.helloDone) {
       _sendError(channel, 'invalidState', 'Cannot pair in this state');
       return;
@@ -304,22 +320,26 @@ class MeshServer {
     peer.approvalTimer = Timer(approvalTimeout, () => reject(id));
     onLog?.call('Join request from ${peer.deviceName}');
     _notify();
-    handler(PeerInfo(
-        deviceId: id, deviceName: peer.deviceName, state: peer.state));
+    handler(
+      PeerInfo(deviceId: id, deviceName: peer.deviceName, state: peer.state),
+    );
   }
 
   void _onAuthenticated(WebSocketChannel channel, ProtocolMessage msg) {
     switch (msg.type) {
       case MessageType.heartbeat:
         registry.markSeen(msg.senderDeviceId);
-        _send(
-          channel,
-          MessageType.heartbeatAck,
-          {'seq': msg.payload['seq'], 'echoTimestamp': msg.timestamp},
-          sessionId: pairing.sessionId,
-        );
+        _send(channel, MessageType.heartbeatAck, {
+          'seq': msg.payload['seq'],
+          'echoTimestamp': msg.timestamp,
+        }, sessionId: pairing.sessionId);
       case MessageType.capabilityAdvertisement:
         _onCapabilities(channel, msg);
+      case MessageType.taskAccept:
+      case MessageType.taskStarted:
+      case MessageType.taskResult:
+      case MessageType.taskFailed:
+        onTaskMessage?.call(msg.senderDeviceId, msg);
       default:
         onLog?.call('Unhandled ${msg.type.wire}');
     }
@@ -335,11 +355,24 @@ class MeshServer {
       }
       final tasks = caps.supportedTasks.map((t) => t.wire).join(', ');
       onLog?.call(
-          'Capabilities from ${_short(id)}: ${tasks.isEmpty ? 'none' : tasks}');
+        'Capabilities from ${_short(id)}: ${tasks.isEmpty ? 'none' : tasks}',
+      );
       _notify();
     } on FormatException catch (e) {
       _sendError(channel, 'invalidCapabilities', e.message);
     }
+  }
+
+  /// Sends a message to an authenticated device. False if it is not connected.
+  bool sendTo(
+    String deviceId,
+    MessageType type,
+    Map<String, dynamic> payload,
+  ) {
+    final entry = _find(deviceId, PeerState.authenticated);
+    if (entry == null) return false;
+    _send(entry.key, type, payload, sessionId: pairing.sessionId);
+    return true;
   }
 
   MapEntry<WebSocketChannel, _Peer>? _find(String id, PeerState state) {
@@ -361,12 +394,16 @@ class MeshServer {
     String? sessionId,
   }) {
     try {
-      channel.sink.add(codec.encode(ProtocolMessage.create(
-        type: type,
-        senderDeviceId: deviceId,
-        sessionId: sessionId,
-        payload: payload,
-      )));
+      channel.sink.add(
+        codec.encode(
+          ProtocolMessage.create(
+            type: type,
+            senderDeviceId: deviceId,
+            sessionId: sessionId,
+            payload: payload,
+          ),
+        ),
+      );
     } catch (_) {
       // Channel already closed.
     }
